@@ -215,7 +215,7 @@ button:disabled{opacity:.4;cursor:default}
             <input type="password" id="pw-input" placeholder="Password" onkeydown="if(event.key==='Enter')unlockAdmin()"/>
           </div>
           <button class="btn-primary" style="width:100%" onclick="unlockAdmin()">Unlock</button>
-          <p style="font-size:11px;color:#bbb;margin-top:12px">Default: ntm2024</p>
+          <p style="font-size:11px;color:#bbb;margin-top:12px">Contact your admin for the password</p>
         </div>
       </div>
     </div>
@@ -246,7 +246,7 @@ const PRIO_MARKS = [
   {label:"Research ranked 5th or 6th", check: v => v[3]>=5},
 ];
 const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbx8CEbApDK91ln-drVqTUAt0RKHNEIwsNJiIX4Yfm6tvpKvDQP-vQHdXQOAxEWprNLp8g/exec";
-const ADMIN_PASSWORD = "ntm2024";
+const ADMIN_PASSWORD_HASH = "c0c3f660b9486befd5e936b77c282d2df41a8ac497d349c053ca11de0b9c1119"; // SHA-256 of actual password
 
 let currentStep = 0;
 
@@ -334,24 +334,28 @@ async function submitForm() {
     garmentScore: 0
   };
 
-  // Save locally
-  const all = loadSubmissions();
-  all.push(submission);
-  saveSubmissions(all);
+  // Show loading
+  const submitBtn = document.querySelector('.btn-success');
+  submitBtn.textContent = 'Submitting...';
+  submitBtn.disabled = true;
 
-  // Send to Google Sheets
   try {
-    fetch(SCRIPT_URL, {
-      method:'POST', mode:'no-cors',
-      headers:{'Content-Type':'application/json'},
+    const resp = await fetch(SCRIPT_URL, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         name: submission.name, institute: submission.institute,
         course: submission.course, email: submission.email, mobile: submission.mobile,
         shoulder: submission.shoulder, hem: submission.hem, fabric: submission.fabric,
-        priorityOrder: prioVals.join(', '), reasoning: submission.reasoning
+        priorityOrder: prioVals, reasoning: submission.reasoning
       })
     });
-  } catch(e) { console.warn('Sheet sync failed',e); }
+    const result = await resp.json();
+    if (result.result !== 'success') throw new Error(result.message||'Error');
+  } catch(err) {
+    console.warn('Sheet sync failed', err);
+    alert('Submitted! Note: Server sync failed, please inform the organiser.');
+  }
 
   // Show success
   [0,1,2].forEach(i => document.getElementById('step'+i).classList.add('hidden'));
@@ -385,9 +389,13 @@ function showTab(t) {
 }
 
 // ── Admin ──
-function unlockAdmin() {
+async function unlockAdmin() {
   const pw = document.getElementById('pw-input').value;
-  if (pw===ADMIN_PASSWORD) {
+  const enc = new TextEncoder().encode(pw);
+  const hashBuf = await crypto.subtle.digest('SHA-256', enc);
+  const hashArr = Array.from(new Uint8Array(hashBuf));
+  const hashHex = hashArr.map(b=>b.toString(16).padStart(2,'0')).join('');
+  if (hashHex === ADMIN_PASSWORD_HASH) {
     document.getElementById('admin-lock').classList.add('hidden');
     document.getElementById('admin-content').classList.remove('hidden');
     renderAdminList();
@@ -396,32 +404,49 @@ function unlockAdmin() {
   }
 }
 
-function renderAdminList() {
-  const subs = loadSubmissions();
-  const sorted = [...subs].sort((a,b)=>scoreSubmission(b).total-scoreSubmission(a).total);
+let sheetData = [];
+
+async function renderAdminList() {
   const listEl = document.getElementById('admin-list');
   document.getElementById('admin-detail').classList.add('hidden');
   listEl.classList.remove('hidden');
+  listEl.innerHTML = '<div style="text-align:center;padding:2rem;color:#aaa;font-size:14px">Loading responses...</div>';
 
-  if (subs.length===0) {
+  try {
+    const resp = await fetch(SCRIPT_URL + '?action=read');
+    const result = await resp.json();
+    sheetData = result.rows || [];
+  } catch(e) {
+    listEl.innerHTML = '<div style="text-align:center;padding:2rem;color:#c0392b;font-size:14px">Could not load responses. Check your internet connection.</div>';
+    return;
+  }
+
+  if (sheetData.length === 0) {
     listEl.innerHTML = '<div style="text-align:center;padding:3rem 1rem;color:#aaa;font-size:14px">No submissions yet.</div>';
     return;
   }
 
-  const exportBtn = `<button onclick="exportCSV()" style="font-size:12px">Export CSV</button>`;
-  let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-    <div><p style="font-weight:500;font-size:15px">Responses (${subs.length})</p><p style="font-size:12px;color:#aaa">Sorted by score</p></div>
-    ${exportBtn}
+  const sorted = [...sheetData].sort((a,b) => {
+    const sa = scoreFromRow(a), sb = scoreFromRow(b);
+    return sb.total - sa.total;
+  });
+
+  let h = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+    <div><p style="font-weight:500;font-size:15px">Responses (${sheetData.length})</p><p style="font-size:12px;color:#aaa">Sorted by score · Live from Google Sheets</p></div>
+    <div style="display:flex;gap:8px">
+      <button onclick="renderAdminList()" style="font-size:12px">↻ Refresh</button>
+      <button onclick="exportCSV()" style="font-size:12px">Export CSV</button>
+    </div>
   </div>`;
 
   sorted.forEach((s,i) => {
-    const sc = scoreSubmission(s);
-    html += `<div class="candidate-row" onclick="renderAdminDetail('${s.id}')">
+    const sc = scoreFromRow(s);
+    h += `<div class="candidate-row" onclick="renderAdminDetail(${s._row})">
       <div style="display:flex;align-items:center;gap:12px">
         <span style="width:28px;height:28px;border-radius:50%;background:#f0eff8;font-size:12px;font-weight:500;display:flex;align-items:center;justify-content:center;color:#777;flex-shrink:0">#${i+1}</span>
         <div>
-          <p style="font-weight:500;font-size:14px">${s.name}</p>
-          <p style="font-size:12px;color:#777">${s.institute} · ${s.course}</p>
+          <p style="font-weight:500;font-size:14px">${s.Name||''}</p>
+          <p style="font-size:12px;color:#777">${s.Institute||''} · ${s.Course||''}</p>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px">
@@ -432,14 +457,29 @@ function renderAdminList() {
     </div>`;
   });
 
-  listEl.innerHTML = html;
+  listEl.innerHTML = h;
 }
 
-function renderAdminDetail(id) {
-  const subs = loadSubmissions();
-  const s = subs.find(x=>x.id===id);
+function scoreFromRow(s) {
+  const garmentScore = Number(s['Garment Score'])||0;
+  const prioStr = s['Priority Order']||'';
+  const vals = prioStr.split(',').map(x=>Number(x.trim()));
+  const prioScore = PRIO_MARKS.filter(m=>m.check(vals)).length;
+  return { garmentScore, prioScore, total: garmentScore+prioScore };
+}
+
+function renderAdminDetail(rowNum) {
+  const s = sheetData.find(x=>x._row===rowNum);
   if (!s) return;
-  const sc = scoreSubmission(s);
+  const sc = scoreFromRow(s);
+  // Map sheet columns to expected keys
+  s.name = s.Name||''; s.institute = s.Institute||''; s.course = s.Course||'';
+  s.email = s.Email||''; s.mobile = s.Mobile||'';
+  s.shoulder = s['Q1 Shoulder']||''; s.hem = s['Q2 Hem']||''; s.fabric = s['Q3 Fabric']||'';
+  s.reasoning = s.Reasoning||'';
+  s.submittedAt = s.Timestamp||'';
+  const prioStr = s['Priority Order']||'';
+  s.priorityOrder = prioStr.split(',').map(x=>Number(x.trim()));
   document.getElementById('admin-list').classList.add('hidden');
   const det = document.getElementById('admin-detail');
   det.classList.remove('hidden');
@@ -488,7 +528,7 @@ function renderAdminDetail(id) {
       <p style="font-weight:500;font-size:14px">Task 1 — Garment observation <span style="font-weight:400;color:#777;font-size:13px">(${sc.garmentScore}/6 — manual)</span></p>
       <div style="display:flex;align-items:center;gap:8px">
         <label style="font-size:12px;color:#777">Award score:</label>
-        <select style="width:70px;font-size:13px" onchange="updateGarmentScore('${s.id}',this.value)">
+        <select style="width:70px;font-size:13px" onchange="updateGarmentScore(${s._row},this.value)">
           ${[0,1,2,3,4,5,6].map(n=>`<option value="${n}"${n===sc.garmentScore?' selected':''}>${n}/6</option>`).join('')}
         </select>
       </div>
@@ -516,21 +556,24 @@ function renderAdminDetail(id) {
   `;
 }
 
-function updateGarmentScore(id, score) {
-  const subs = loadSubmissions();
-  const idx = subs.findIndex(x=>x.id===id);
-  if (idx>-1) { subs[idx].garmentScore = Number(score); saveSubmissions(subs); }
+async function updateGarmentScore(row, score) {
+  try {
+    await fetch(`${SCRIPT_URL}?action=score&row=${row}&score=${score}`);
+    // update local cache
+    const s = sheetData.find(x=>x._row===Number(row));
+    if (s) s['Garment Score'] = Number(score);
+  } catch(e) { console.warn('Score update failed', e); }
 }
 
 function exportCSV() {
-  const subs = loadSubmissions();
-  const header = ['Name','Institute','Course','Email','Mobile','Submitted At','Garment Score','Priority Score','Total','Q1 Shoulder','Q2 Hem','Q3 Fabric','Priority Order','Reasoning'];
-  const rows = subs.map(s => {
-    const sc = scoreSubmission(s);
-    return [s.name,s.institute,s.course||'',s.email,s.mobile||'',
-      new Date(s.submittedAt).toLocaleString(),sc.garmentScore,sc.prioScore,sc.total,
-      s.shoulder||'',s.hem||'',s.fabric||'',
-      (s.priorityOrder||[]).join('|'), s.reasoning||''];
+  if (!sheetData.length) { alert('No data to export. Please refresh first.'); return; }
+  const header = ['Name','Institute','Course','Email','Mobile','Timestamp','Garment Score','Priority Score','Total','Q1 Shoulder','Q2 Hem','Q3 Fabric','Priority Order','Reasoning'];
+  const rows = sheetData.map(s => {
+    const sc = scoreFromRow(s);
+    return [s.Name||'',s.Institute||'',s.Course||'',s.Email||'',s.Mobile||'',
+      s.Timestamp||'',sc.garmentScore,sc.prioScore,sc.total,
+      s['Q1 Shoulder']||'',s['Q2 Hem']||'',s['Q3 Fabric']||'',
+      s['Priority Order']||'', s.Reasoning||''];
   });
   const csv = [header,...rows].map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(',')).join('\n');
   const a = document.createElement('a');
